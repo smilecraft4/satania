@@ -1,0 +1,9 @@
+{
+    "dependencies": [
+        "glad",
+        "glfw3",
+        "assimp",
+        "glm",
+        "zlib"
+    ]
+}

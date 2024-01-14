@@ -1,0 +1,197 @@
+// Fast 3D Triangle-Box Overlap Testing
+#version 460 core
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+struct Vertex
+{
+    vec3 position;
+    vec4 color;
+    vec2 uv;
+};
+
+struct Triangle
+{
+    Vertex vertices[3];
+};
+
+struct AABB
+{
+    vec3 bound_min;
+    vec3 bound_max;
+    vec3 center;
+};
+
+struct Node
+{
+	AABB                aabb;
+	int                 node_right;
+	int                 node_left;
+	int                 leaf;
+	int                 leaf_elem;
+};
+
+struct Voxel
+{
+    int color;
+};
+
+layout(std430, binding = 0) readonly buffer nodes
+{
+    Node nodes_data[];
+};
+
+layout(std430, binding = 1) readonly buffer triangles
+{
+    Triangle triangles_data[];
+};
+
+layout(std430, binding = 2) writeonly buffer voxels
+{
+    Voxel voxels_data[];
+};
+
+uniform dvec3 _AABB_min;
+uniform dvec3 _AABB_max;
+uniform ivec3 _ChunkSize;
+uniform double _Resolution;
+uniform int _ElementsCount;
+uniform int _TriangleCount;
+uniform int _NodeCount;
+
+bool testTriangleAxis(dvec3 vertex_0, dvec3 vertex_1, dvec3 vertex_2, dvec3 axis, double half_distance)
+{
+    double proj_0 = dot(axis, vertex_0);
+    double proj_1 = dot(axis, vertex_1);
+    double proj_2 = dot(axis, vertex_2);
+
+    double proj_min = min(min(proj_0, proj_1), proj_2);
+    double proj_max = max(max(proj_0, proj_1), proj_2);
+
+    return (proj_max < -half_distance || proj_min > half_distance);
+}
+
+bool triangleBoxOverlap(dvec3 box_center, double box_half_length, dvec3 vertex_0, dvec3 vertex_1, dvec3 vertex_2)
+{
+    // Make box_center the origin
+    vertex_0 -= box_center;
+    vertex_1 -= box_center;
+    vertex_2 -= box_center;
+
+    // Test for box normals
+    if (testTriangleAxis(vertex_0, vertex_1, vertex_2, dvec3(1, 0, 0), box_half_length))
+        return false;
+    if (testTriangleAxis(vertex_0, vertex_1, vertex_2, dvec3(0, 1, 0), box_half_length))
+        return false;
+    if (testTriangleAxis(vertex_0, vertex_1, vertex_2, dvec3(0, 0, 1), box_half_length))
+        return false;
+
+    // Test triangle normal
+    dvec3 triangle_normal = normalize(cross(vertex_1 - vertex_0, vertex_2 - vertex_1));
+    if (testTriangleAxis(vertex_0, vertex_1, vertex_2, triangle_normal, box_half_length))
+        return false;
+
+    // Test for the 9 edges cross-product
+    dvec3 edge_0 = normalize(vertex_1 - vertex_0);
+    dvec3 edge_1 = normalize(vertex_2 - vertex_1);
+    dvec3 edge_2 = normalize(vertex_0 - vertex_2);
+
+    if (testTriangleAxis(vertex_0, vertex_1, vertex_2, dvec3(0.0, -edge_0.z, edge_0.y), box_half_length))
+        return false;
+    if (testTriangleAxis(vertex_0, vertex_1, vertex_2, dvec3(0.0, -edge_1.z, edge_1.y), box_half_length))
+        return false;
+    if (testTriangleAxis(vertex_0, vertex_1, vertex_2, dvec3(0.0, -edge_2.z, edge_2.y), box_half_length))
+        return false;
+    if (testTriangleAxis(vertex_0, vertex_1, vertex_2, dvec3(edge_0.z, 0.0, -edge_0.x), box_half_length))
+        return false;
+    if (testTriangleAxis(vertex_0, vertex_1, vertex_2, dvec3(edge_1.z, 0.0, -edge_1.x), box_half_length))
+        return false;
+    if (testTriangleAxis(vertex_0, vertex_1, vertex_2, dvec3(edge_2.z, 0.0, -edge_2.x), box_half_length))
+        return false;
+    if (testTriangleAxis(vertex_0, vertex_1, vertex_2, dvec3(-edge_0.y, edge_0.x, 0.0), box_half_length))
+        return false;
+    if (testTriangleAxis(vertex_0, vertex_1, vertex_2, dvec3(-edge_1.y, edge_1.x, 0.0), box_half_length))
+        return false;
+    if (testTriangleAxis(vertex_0, vertex_1, vertex_2, dvec3(-edge_2.y, edge_2.x, 0.0), box_half_length))
+        return false;
+
+    // if all the test succeeds than there is an intersection
+    return true;
+}
+
+// TODO: Optimize this maybe
+bool AABBintersect(dvec3 pos, double extent, dvec3 aabb_min, dvec3 aabb_max)
+{
+    if(aabb_min.x <= pos.x + extent && pos.x - extent <= aabb_max.x && 
+       aabb_min.y <= pos.y + extent && pos.y - extent <= aabb_max.y &&
+       aabb_min.z <= pos.z + extent && pos.z - extent <= aabb_max.z)
+    {
+        return true;
+    }
+
+    return false;
+}
+
+void main()
+{
+    // const ivec3 voxel_size = ivec3(abs(_AABB_max - _AABB_min) / _Resolution);
+    const ivec3 voxel_size = _ChunkSize;
+
+    uint voxel_index = gl_GlobalInvocationID.x + (gl_GlobalInvocationID.y * voxel_size.x) +
+                       (gl_GlobalInvocationID.z * voxel_size.x * voxel_size.y);
+
+    const dvec3 box_center = _AABB_min + vec3(gl_GlobalInvocationID) * _Resolution;
+    const double box_half_length = _Resolution / 2.0;
+
+    // check if this voxel is colliding with a triangle of the mesh to voxelize
+    voxels_data[voxel_index].color = 0;
+
+
+    int stack[1024];
+    int sp = 0;
+
+    stack[sp++] = 0;
+    while(sp > 0) {
+        int top = stack[--sp];
+        Node node = nodes_data[top];
+
+        // node is a leaf node
+        if(node.leaf_elem > 0) {
+            for (int i = node.leaf; i < node.leaf + node.leaf_elem; i++) {
+                Triangle triangle = triangles_data[i];
+    
+                const dvec3 vertex_0 = dvec3(triangle.vertices[0]);
+                const dvec3 vertex_1 = dvec3(triangle.vertices[1]);
+                const dvec3 vertex_2 = dvec3(triangle.vertices[2]);
+    
+                if (triangleBoxOverlap(box_center, box_half_length, vertex_0, vertex_1, vertex_2)) 
+                {
+                    // Collision with triangle, this unique voxel is set as filled and this compute unit is terminated
+                    voxels_data[voxel_index].color = 1;
+                    continue;
+                }
+            }
+        }
+        
+        bool inLeft = false;
+        bool inRight = false;
+
+        // check left node
+        if(node.node_left > 0) {
+            if(AABBintersect(box_center, box_half_length, nodes_data[node.node_left].aabb.bound_min, nodes_data[node.node_left].aabb.bound_max)) {
+                stack[sp++] = node.node_left;
+            }
+        }
+         
+        // check right node
+        if(node.node_right > 0) {
+            if(AABBintersect(box_center, box_half_length, nodes_data[node.node_right].aabb.bound_min, nodes_data[node.node_right].aabb.bound_max)) {
+                stack[sp++] = node.node_right;
+            }
+        }
+        // the box center is inside no node
+    }    
+    
+
+    return;
+}
