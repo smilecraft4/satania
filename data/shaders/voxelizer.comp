@@ -160,9 +160,9 @@ void main()
             for (int i = node.leaf; i < node.leaf + node.leaf_elem; i++) {
                 Triangle triangle = triangles_data[i];
     
-                const dvec3 vertex_0 = dvec3(triangle.vertices[0]);
-                const dvec3 vertex_1 = dvec3(triangle.vertices[1]);
-                const dvec3 vertex_2 = dvec3(triangle.vertices[2]);
+                const dvec3 vertex_0 = dvec3(triangle.vertices[0].position);
+                const dvec3 vertex_1 = dvec3(triangle.vertices[1].position);
+                const dvec3 vertex_2 = dvec3(triangle.vertices[2].position);
     
                 if (triangleBoxOverlap(box_center, box_half_length, vertex_0, vertex_1, vertex_2)) 
                 {
